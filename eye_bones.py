@@ -11,7 +11,7 @@ class VertexGroups(bpy.types.PropertyGroup):
 # Function to add a vertex to the collection
 def add_vertex(obj, index, co, bone="", weight=""):
     if not hasattr(obj, 'vertices'):
-        raise ValueError(f"No vertices parameter in {obj.name}")
+        raise Valu eError(f"No vertices parameter in {obj.name}")
     
     # Initialize the index map if not already done
     if not hasattr(obj, 'vertex_index_map'):
