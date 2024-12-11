@@ -5,13 +5,15 @@ bl_info = {
 }
 
 import bpy, enum, bmesh
+from mathutils import Vector
+
+_BOME_SCALE = 0.1 
 
 class Lid():
     def __init__(self):
         self.indices = []
         self.coordinates = []
         self.bones = []
-        self.obj = ''
 
 class Lid_Layers(enum.IntEnum):
     TOP = 0
@@ -22,7 +24,7 @@ def findConnected(vertex, mesh, visited=None):
         visited = set()
     
     visited.add(vertex.index)  # Store index of the vertex
-    connected_vertices = [vertex]  # Store vertex
+    connected_vertices = [vertex]  # Store Active vertex
     
     for edge in vertex.link_edges:
         linked_vert = edge.other_vert(vertex)
@@ -50,36 +52,50 @@ class VIEW3D_OT_vizor_add_remove_lid(bpy.types.Operator):
         assert bpy.context.mode == 'EDIT_MESH' # Ensure we are in Edit Mode
         mesh_obj = context.active_object
         mesh = bmesh.from_edit_mesh(mesh_obj.data)
+        selected_verts = [v for v in mesh.verts if v.select]
         #Top Eyelid must have at least 3 verts selected (two for corners and n-amount for bone action rig)
-        if self.lidLayer in ["TOP", "Top"] and len(mesh.select_history) < 3:
-            raise ValueError("Please select at least 3 verts selected!")
+        if self.lidLayer in ["TOP", "Top"] and len(selected_verts) < 3:
+            raise ValueError("Please select at least 3 verts!")
         #top lid selection -2 should be euqual to bottom selection
         if len(context.scene.upper_lid.indices) or len(context.scene.lower_lid.indices):
             match self.lidLayer:
                 case 'BOTTOM':
-                    if len(context.scene.upper_lid.indices)-2 != len(mesh.select_history):
-                        raise ValueError("Please select same amount of vertices")
+                    top_lid_size = len(context.scene.upper_lid.indices)-2
+                    if top_lid_size != len(selected_verts):
+                        raise ValueError(f"Please select {top_lid_size-(len(selected_verts))} more vertices")
                 case 'TOP':
-                    if len(context.scene.lower_lid.indices) != len(mesh.select_history)-2:
-                        raise ValueError("Please select same amount of vertices")
+                    low_lid_size = len(context.scene.lower_lid.indices)
+                    if low_lid_size != len(selected_verts)-2:
+                        raise ValueError(f"Please select {low_lid_size-(len(selected_verts)-2)} more vertices")
         # Check if there's an active vertex
         if not mesh.select_history:
-            raise ValueError("No Vertecies selected")
+            raise ValueError("No Active Vertex selected")
         active_vert = mesh.select_history[-1]
-
+        #starting from active vertex sort list of selected verticies
         sortedVerts = findConnected(active_vert, mesh)
         #store indices
+        indicies = [vert.index for vert in sortedVerts]
         match self.lidLayer:
             case 'TOP':
+                #if lower indx list exist check if they have common indx
+                if context.scene.lower_lid.indices:
+                    common = set(indicies) & set(context.scene.lower_lid.indices)
+                    if common:
+                        raise ValueError(f"Top and Bottom lid have common verts{common}")
                 #add top lid indicies
-                context.scene.upper_lid.indices = [vert.index for vert in sortedVerts]
-                context.scene.upper_lid.coordinates = [vert.co for vert in sortedVerts]
-                context.scene.upper_lid.obj = mesh_obj
+                context.scene.upper_lid.indices = indicies
+                context.scene.upper_lid.coordinates = [vert.co.copy() for vert in sortedVerts]
+                context.scene.lid_object = mesh_obj.name
             case 'BOTTOM':
+                #if upper indx list exist check if they have common indx
+                if context.scene.upper_lid.indices:
+                    common = set(indicies) & set(context.scene.upper_lid.indices)
+                    if common:
+                        raise ValueError(f"Top and Bottom lid have common verts{common}")
                 #add bottom lid indicies
-                context.scene.lower_lid.indices = [vert.index for vert in sortedVerts]
-                context.scene.lower_lid.coordinates = [vert.co for vert in sortedVerts]
-                context.scene.lower_lid.obj = mesh_obj
+                context.scene.lower_lid.indices = indicies
+                context.scene.lower_lid.coordinates = [vert.co.copy() for vert in sortedVerts]
+                context.scene.lid_object = mesh_obj.name
     
     def remove_indicies(self,context):
         match self.lidLayer:
@@ -87,12 +103,12 @@ class VIEW3D_OT_vizor_add_remove_lid(bpy.types.Operator):
                 #remove top lid indicies
                 context.scene.upper_lid.indices = []
                 context.scene.upper_lid.coordinates = []
-                context.scene.upper_lid.obj = ''
+                context.scene.lid_object = ''
             case 'BOTTOM':
                 #remove bottom lid indicies
                 context.scene.lower_lid.indices = []
                 context.scene.lower_lid.coordinates = []
-                context.scene.lower_lid.obj = ''
+                context.scene.lid_object = ''
     
     def execute(self, context):
         match self.add:
@@ -105,6 +121,100 @@ class VIEW3D_OT_vizor_add_remove_lid(bpy.types.Operator):
                 self.remove_indicies(context)
                 print(f"{self.lidLayer} Lid {self.lidIndex} is Removed")
 
+        return {'FINISHED'}
+
+class VIEW3D_OT_vizor_generate_lid_rig(bpy.types.Operator):
+    bl_idname = "object.vizor_generate_lid_rig"
+    bl_label = "Operator to rig lid"
+
+    def generate_bones(self, context, verts: Lid, bone_name: str, top: bool):
+        '''Generates bones for all indices of the lid'''
+        # Switch to Object Mode
+        if bpy.context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+
+        obj = bpy.data.objects.get(context.scene.lid_armature) #armature object
+        if not obj:
+            raise ValueError(f"Armature {context.scene.lid_armature} doesnt exist!")
+        mesh_obj = bpy.data.objects.get(context.scene.lid_object) #mesh object
+
+        if not mesh_obj:
+            raise ValueError(f"Mesh Object {context.scene.lid_object} doesnt exist!")
+        armature = obj.data
+        context.view_layer.objects.active = obj
+        bpy.ops.object.mode_set(mode='EDIT')
+
+        # Iterate over sorted vertices and create bones
+        for i, vert in enumerate(verts.indices):
+            if (i == 0 or i == len(verts.indices)-1) and top:
+                #corner bone name
+                if i == 0:
+                    name = f"corner_{bone_name}_start" #name of the bone
+                else:
+                    name = f"corner_{bone_name}_end" #name of the bone
+            elif top:
+                name = f"{bone_name}_{i-1}" #name of the bone - 1 corner bone
+            else:
+                name = f"{bone_name}_{i}" #name of the bone
+            if name in armature.edit_bones:
+                armature.edit_bones.remove(armature.edit_bones[name])  # Remove if bone exists in armature
+            bone = armature.edit_bones.new(name=name)
+            #add bone to the list
+            verts.bones.append(bone.name)
+            #set bone position
+            bone.head = mesh_obj.matrix_world @ verts.coordinates[i]
+            bone.tail = bone.head + Vector((0, 0, _BOME_SCALE))  # Adjust the tail position as needed
+
+            #vert.weight = f"DEF-{bone.name}"
+    
+    def generate_controller(self, context, bone_name: str, position: Vector):
+        obj = bpy.data.objects.get(context.scene.lid_armature) #armature object
+        if not obj:
+            raise ValueError(f"Armature {context.scene.lid_armature} doesnt exist!")
+        armature = obj.data
+        #create Action ctrl bone
+        if bone_name in armature.edit_bones:
+            armature.edit_bones.remove(armature.edit_bones[bone_name])  # Remove if bone exists in armature
+        bone = armature.edit_bones.new(name=bone_name)
+
+        mesh_obj = bpy.data.objects.get(context.scene.lid_object)
+        if not mesh_obj:
+            raise ValueError(f"Mesh Object {context.scene.lid_object} doesnt exist!")
+        
+        #set bone position
+        bone.head = mesh_obj.matrix_world @ position
+        bone.tail = bone.head + Vector((0, 0, _BOME_SCALE/2))  # Adjust the tail position as needed
+
+    def generate_action(self, context):
+        '''add action to selected armature and add three keyframes opened and closed eyelids'''
+        #check if armature, bones exist
+        obj = bpy.data.objects.get(context.scene.lid_armature) #armature object
+        if not obj:
+            raise ValueError(f"Armature {context.scene.lid_armature} doesnt exist!")
+        armature = obj.data
+        for b in context.scene.upper_lid.bones + context.scene.lower_lid.bones:
+            bone = armature.bones.get(b)
+            if not bone:
+                raise ValueError(f"Bone {b} doesnt exist")
+        
+
+    def execute(self, context):
+        bpy.ops.object.mode_set(mode='OBJECT') #set object mode
+        #clear bones just in case we run generate 2nd time
+        context.scene.upper_lid.bones = []
+        context.scene.lower_lid.bones = []
+        context.scene.lid_ctrl_bone = ''
+
+        assert bpy.context.mode == 'OBJECT'
+        #generate bones for lid and CTRL bone for Action trigger
+        self.generate_bones(context, context.scene.upper_lid, 'upper_lid', True)
+        self.generate_bones(context, context.scene.lower_lid, 'lower_lid', False)
+        position = (context.scene.upper_lid.coordinates[0] + context.scene.upper_lid.coordinates[-1]) / 2 #find mid position for ctrl
+        self.generate_controller(context, 'ctrl_lid', position)
+        #generate action with keyframes
+        self.generate_action(context)
+        #add Action constrains
         return {'FINISHED'}
 
 class VIEW3D_PT_rigging_vizor(bpy.types.Panel):
@@ -142,12 +252,14 @@ class VIEW3D_PT_rigging_vizor(bpy.types.Panel):
                 op.lidLayer = lid_layer
                 op.lidIndex = 0 #you might want multiple lids attached using action
                 op.add = True
-
-
+        
     def draw(self, context):
         layout = self.layout
 
+        
+
         #ARMATURE ADD
+        layout.label(text='Fisrt select the Armature for Rig')
         layout.prop_search(
             data=context.scene, # Object data to store the result
             property="lid_armature",    # Property to store the selected material
@@ -165,18 +277,27 @@ class VIEW3D_PT_rigging_vizor(bpy.types.Panel):
             
         #UPPER LID ADD/REMOVE
         self.draw_lid(context, 'BOTTOM')
-
+        
         #GENERATE
+        if context.scene.upper_lid.indices and context.scene.lower_lid.indices:
+            #draw Generate button
+            row = layout.row()
+            row.label(text='Generate rig')
+            row.operator(VIEW3D_OT_vizor_generate_lid_rig.bl_idname, text="generate")
+
+
+        
   
 classes = (
     VIEW3D_PT_rigging_vizor,
     VIEW3D_OT_vizor_add_remove_lid,
+    VIEW3D_OT_vizor_generate_lid_rig,
 )
 def register_properties():
     scene = bpy.types.Scene #property space
     scene.lid_armature = bpy.props.StringProperty(name="Armature")
-    scene.object_name = bpy.props.StringProperty(name="object_name")  # Name of the object containing the vertices
-    scene.armature_name = bpy.props.StringProperty("armature_name")  # Name of the selected armature
+    scene.lid_object = bpy.props.StringProperty(name="Mesh object")
+    scene.lid_ctrl_bone = bpy.props.StringProperty(name="Action Controller bone")
     scene.upper_lid = Lid()
     scene.lower_lid = Lid()
 

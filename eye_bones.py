@@ -27,9 +27,7 @@ def add_vertex(obj, index, co, bone="", weight=""):
     vertex.co = co
     vertex.bone = bone
     vertex.weight = weight
-    
-
-
+ 
 def generate_bones(mesh_obj):
     #internal method
     def findConnected(vertex, mesh, visited=None):
