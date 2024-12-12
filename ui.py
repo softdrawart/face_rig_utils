@@ -7,7 +7,13 @@ bl_info = {
 import bpy, enum, bmesh
 from mathutils import Vector
 
-_BOME_SCALE = 0.1 
+_BONE_SCALE = 0.01 
+_CTRL_BONE_ACTION_MIN = 0
+_CTRL_BONE_ACTION_MAX = -0.01
+_CTRL_BONE_ACTION_AXIS = 'LOCATION_Y'
+_ACTION_FRAME_START = 0
+_ACTION_FRAME_END = 2
+_ACTION_NAME = 'lid-close'
 
 class Lid():
     def __init__(self):
@@ -164,7 +170,7 @@ class VIEW3D_OT_vizor_generate_lid_rig(bpy.types.Operator):
             verts.bones.append(bone.name)
             #set bone position
             bone.head = mesh_obj.matrix_world @ verts.coordinates[i]
-            bone.tail = bone.head + Vector((0, 0, _BOME_SCALE))  # Adjust the tail position as needed
+            bone.tail = bone.head + Vector((0, 0, _BONE_SCALE))  # Adjust the tail position as needed
 
             #vert.weight = f"DEF-{bone.name}"
     
@@ -177,27 +183,134 @@ class VIEW3D_OT_vizor_generate_lid_rig(bpy.types.Operator):
         if bone_name in armature.edit_bones:
             armature.edit_bones.remove(armature.edit_bones[bone_name])  # Remove if bone exists in armature
         bone = armature.edit_bones.new(name=bone_name)
-
-        mesh_obj = bpy.data.objects.get(context.scene.lid_object)
-        if not mesh_obj:
-            raise ValueError(f"Mesh Object {context.scene.lid_object} doesnt exist!")
         
         #set bone position
-        bone.head = mesh_obj.matrix_world @ position
-        bone.tail = bone.head + Vector((0, 0, _BOME_SCALE/2))  # Adjust the tail position as needed
+        bone.head = position
+        bone.tail = bone.head + Vector((0, 0, _BONE_SCALE/2))  # Adjust the tail position as needed
 
-    def generate_action(self, context):
+        #store ctrl bone name
+        context.scene.lid_ctrl_bone = bone.name
+
+    def move_bone_to_bone(self, context, bone1: str, bone2: str):
+        '''moving bones adding keyframes, assuming we have action active where we add keyframes'''
+        #check if armature, bones exist
+        armature = bpy.data.objects.get(context.scene.lid_armature) #armature object
+        if not armature:
+            raise ValueError(f"Armature {context.scene.lid_armature} doesnt exist!")
+        if not armature.animation_data and not armature.animation_data.action:
+            raise ValueError(f"Armature {context.scene.lid_armature} doesnt have action assigned!")
+
+        # Define source and target bones
+        pbon1 = armature.pose.bones.get(bone1)
+        pbon2 = armature.pose.bones.get(bone2)
+
+        if not pbon1 or not pbon2:
+            raise ValueError(f"Bones {bone1} or {bone2} dont exist!")
+
+        # Insert a keyframe for the target bone's location
+        frame = 0
+        #reset position
+        pbon1.location = [0,0,0]
+        pbon2.location = [0,0,0]
+
+        pbon1.keyframe_insert(data_path="location", frame=frame)
+        print(f"{bone1} location on frame {frame} is {list(pbon1.location)}")
+
+        # Get the world space location of the source bone
+        source_location = armature.matrix_world @ pbon2.matrix.copy()
+        
+        # Move the target bone to the source location
+        pbon1.matrix = source_location
+        
+        # Insert a keyframe for the target bone's locationframe
+        frame = 2
+        pbon1.keyframe_insert(data_path="location", frame=frame)
+        print(f"{bone1} location on frame {frame} is {list(pbon1.location)}")
+
+    def add_action_constraint(self, context, bone: str, ctrl_bone: str, action_name: str, constraint_name: str):
+        '''add constraint and set parameters'''
+        #check if armature, bones exist
+        armature = bpy.data.objects.get(context.scene.lid_armature) #armature object
+        action = bpy.data.actions.get(action_name)
+        if not armature:
+            raise ValueError(f"Armature {context.scene.lid_armature} doesnt exist!")
+        if not armature.animation_data and not armature.animation_data.action:
+            raise ValueError(f"Armature {context.scene.lid_armature} doesnt have action assigned!")
+
+        # Define source and target bones
+        pbone = armature.pose.bones.get(bone)
+        ctrl_pose_bone = armature.pose.bones.get(ctrl_bone)
+
+        if not pbone or not ctrl_pose_bone:
+            raise ValueError(f"Bones {bone} or {ctrl_bone} dont exist!")
+
+        #check if bone has constraint 'lid-action' and remove it
+        if pbone.constraints:
+            for constraint in [c for c in pbone.constraints if c.type == 'ACTION' and c.name == constraint_name]:
+                pbone.constraints.remove(constraint)
+        
+        #add constraint to the list
+        constraint = pbone.constraints.new(type='ACTION')
+        constraint.target = armature
+        constraint.subtarget = ctrl_bone
+        constraint.transform_channel = _CTRL_BONE_ACTION_AXIS
+        constraint.target_space = 'LOCAL'
+        constraint.min = _CTRL_BONE_ACTION_MIN
+        constraint.max = _CTRL_BONE_ACTION_MAX
+        constraint.action = action
+
+    def generate_action(self, context, action_name: str):
         '''add action to selected armature and add three keyframes opened and closed eyelids'''
+        # Force update by exiting edit mode
+        bpy.ops.object.mode_set(mode='OBJECT')
+        upper_bones = context.scene.upper_lid.bones
+        lower_bones = context.scene.lower_lid.bones
+        controller_bone = context.scene.lid_ctrl_bone
+
         #check if armature, bones exist
         obj = bpy.data.objects.get(context.scene.lid_armature) #armature object
         if not obj:
             raise ValueError(f"Armature {context.scene.lid_armature} doesnt exist!")
         armature = obj.data
-        for b in context.scene.upper_lid.bones + context.scene.lower_lid.bones:
-            bone = armature.bones.get(b)
+        pose_test = [b.name for b in obj.pose.bones]
+        for b in upper_bones + lower_bones:
+            bone = obj.pose.bones.get(b)
             if not bone:
                 raise ValueError(f"Bone {b} doesnt exist")
-        
+        #create action and add it to armature object
+        action = bpy.data.actions.get(action_name)
+        if action:
+            bpy.data.actions.remove(action)
+        if obj.animation_data:
+            obj.animation_data_clear()
+        action = bpy.data.actions.new(action_name)
+        print(f"action {action.name} is created")
+        anim_data = obj.animation_data_create()
+        obj.animation_data.action = action
+
+        #force update
+        bpy.ops.object.mode_set(mode='POSE')
+
+        # Check for length match
+        if len(upper_bones)-2 != len(lower_bones):
+            raise ValueError("The two bone lists have mismatched lengths.")
+        #formulate a dict of bones
+        for a, b in zip(upper_bones[1:-1], lower_bones[:]):
+            #move top lid bones to bottom lid bones location
+            self.move_bone_to_bone(context, a, b)
+            #add action constraint to bone1 target to controller bone Y axis Local space
+            self.add_action_constraint(context, a, controller_bone, action.name, action.name + '-constraint')
+
+        #force update
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+        #set frame 0 before action detach
+        context.scene.frame_current = 0
+        context.view_layer.update()
+
+        #set fake user and remove action from Armature
+        action.use_fake_user = True
+        obj.animation_data.action = None
 
     def execute(self, context):
         bpy.ops.object.mode_set(mode='OBJECT') #set object mode
@@ -209,12 +322,16 @@ class VIEW3D_OT_vizor_generate_lid_rig(bpy.types.Operator):
         assert bpy.context.mode == 'OBJECT'
         #generate bones for lid and CTRL bone for Action trigger
         self.generate_bones(context, context.scene.upper_lid, 'upper_lid', True)
+
+        armature = bpy.data.objects.get(context.scene.lid_armature).data
+
         self.generate_bones(context, context.scene.lower_lid, 'lower_lid', False)
+
         position = (context.scene.upper_lid.coordinates[0] + context.scene.upper_lid.coordinates[-1]) / 2 #find mid position for ctrl
         self.generate_controller(context, 'ctrl_lid', position)
+
         #generate action with keyframes
-        self.generate_action(context)
-        #add Action constrains
+        self.generate_action(context, _ACTION_NAME)
         return {'FINISHED'}
 
 class VIEW3D_PT_rigging_vizor(bpy.types.Panel):
@@ -227,9 +344,9 @@ class VIEW3D_PT_rigging_vizor(bpy.types.Panel):
         #size of current lid indicies
         lid_size = len((context.scene.upper_lid.indices if lid_layer == 'TOP' else context.scene.lower_lid.indices))
         #dont DRAW bottom lid row if TOP is not set 
-        if (lid_layer in ["BOTTOM", "Bottom"]):
-            if lid_size == 0 and len(context.scene.upper_lid.indices) == 0:
-                return None
+        #if (lid_layer in ["BOTTOM", "Bottom"]):
+        #    if lid_size == 0 and len(context.scene.upper_lid.indices) == 0:
+        #        return None
         layout = self.layout
         
         
