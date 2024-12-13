@@ -1,3 +1,4 @@
+#add size to bones based on the mesh size and also generate slide value MAX VALUE
 bl_info = {
     "name": "Vizor Face Rigging",
     "blender": (2, 80, 0),
@@ -9,7 +10,7 @@ from mathutils import Vector
 
 _BONE_SCALE = 0.01 
 _CTRL_BONE_ACTION_MIN = 0
-_CTRL_BONE_ACTION_MAX = -0.01
+_CTRL_BONE_ACTION_MAX = -0.1
 _CTRL_BONE_ACTION_AXIS = 'LOCATION_Y'
 _ACTION_FRAME_START = 0
 _ACTION_FRAME_END = 2
@@ -258,6 +259,9 @@ class VIEW3D_OT_vizor_generate_lid_rig(bpy.types.Operator):
         constraint.min = _CTRL_BONE_ACTION_MIN
         constraint.max = _CTRL_BONE_ACTION_MAX
         constraint.action = action
+        constraint.frame_start = _ACTION_FRAME_START
+        constraint.frame_end = _ACTION_FRAME_END
+
 
     def generate_action(self, context, action_name: str):
         '''add action to selected armature and add three keyframes opened and closed eyelids'''
